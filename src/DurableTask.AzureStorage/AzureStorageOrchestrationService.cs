@@ -30,6 +30,7 @@ namespace DurableTask.AzureStorage
     using DurableTask.Core;
     using DurableTask.Core.History;
     using Microsoft.WindowsAzure.Storage;
+    using Microsoft.WindowsAzure.Storage.Blob;
     using Microsoft.WindowsAzure.Storage.Queue;
     using Microsoft.WindowsAzure.Storage.Table;
     using Newtonsoft.Json;
@@ -64,6 +65,7 @@ namespace DurableTask.AzureStorage
         readonly ResettableLazy<Task> taskHubCreator;
         readonly BlobLeaseManager leaseManager; 
         readonly PartitionManager<BlobLease> partitionManager;
+        readonly SharedBufferManager sharedBufferManager;
 
         readonly object hubCreationLock;
 
@@ -85,18 +87,24 @@ namespace DurableTask.AzureStorage
             ValidateSettings(settings);
 
             this.settings = settings;
+            this.sharedBufferManager = new SharedBufferManager(
+                maxBufferPoolSize: 4 * 1024 * 1024 /*  4 MB */,
+                maxBufferSize: 1 * 1024 * 1024     /*  1 MB */,
+                defaultBufferSize: 64 * 1024       /* 64 KB */);
             this.tableEntityConverter = new TableEntityConverter();
             CloudStorageAccount account = CloudStorageAccount.Parse(settings.StorageConnectionString);
             this.storageAccountName = account.Credentials.AccountName;
             this.stats = new AzureStorageOrchestrationServiceStats();
             this.queueClient = account.CreateCloudQueueClient();
+            this.queueClient.BufferManager = this.sharedBufferManager;
             CloudTableClient tableClient = account.CreateCloudTableClient();
+            tableClient.BufferManager = this.sharedBufferManager;
 
             // TODO: Need to do input validation on the TaskHubName.
 
             this.ownedControlQueues = new ConcurrentDictionary<string, CloudQueue>();
             this.allControlQueues = new ConcurrentDictionary<string, CloudQueue>();
-            this.workItemQueue = GetWorkItemQueue(account, settings.TaskHubName);
+            this.workItemQueue = GetWorkItemQueue(this.queueClient, settings.TaskHubName);
 
             for (int i = 0; i < this.settings.PartitionCount; i++)
             {
@@ -132,10 +140,13 @@ namespace DurableTask.AzureStorage
                 this.GetTaskHubCreatorTask,
                 LazyThreadSafetyMode.ExecutionAndPublication);
 
+            CloudBlobClient blobClient = account.CreateCloudBlobClient();
+            blobClient.BufferManager = this.sharedBufferManager;
+
             this.leaseManager = GetBlobLeaseManager(
                 settings.TaskHubName,
                 settings.WorkerId,
-                account,
+                blobClient,
                 settings.LeaseInterval,
                 settings.LeaseRenewInterval,
                 this.stats);
@@ -184,7 +195,12 @@ namespace DurableTask.AzureStorage
                 throw new ArgumentNullException(nameof(account));
             }
 
-            return GetQueueInternal(account.CreateCloudQueueClient(), taskHub, "workitems");
+            return GetWorkItemQueue(account.CreateCloudQueueClient(), taskHub);
+        }
+
+        internal static CloudQueue GetWorkItemQueue(CloudQueueClient queueClient, string taskHub)
+        {
+            return GetQueueInternal(queueClient, taskHub, "workitems");
         }
 
         static CloudQueue GetQueueInternal(CloudQueueClient queueClient, string taskHub, string suffix)
@@ -208,7 +224,7 @@ namespace DurableTask.AzureStorage
         static BlobLeaseManager GetBlobLeaseManager(
             string taskHub,
             string workerName,
-            CloudStorageAccount account,
+            CloudBlobClient blobClient,
             TimeSpan leaseInterval,
             TimeSpan renewalInterval,
             AzureStorageOrchestrationServiceStats stats)
@@ -219,7 +235,7 @@ namespace DurableTask.AzureStorage
                 leaseContainerName: taskHub.ToLowerInvariant() + "-leases",
                 blobPrefix: string.Empty,
                 consumerGroupName: "default",
-                storageClient: account.CreateCloudBlobClient(),
+                storageClient: blobClient,
                 leaseInterval: leaseInterval,
                 renewInterval: renewalInterval,
                 skipBlobContainerCreation: false,
@@ -504,7 +520,13 @@ namespace DurableTask.AzureStorage
                 throw new ArgumentNullException(nameof(taskHub));
             }
 
-            BlobLeaseManager inactiveLeaseManager = GetBlobLeaseManager(taskHub, "n/a", account, TimeSpan.Zero, TimeSpan.Zero, null);
+            BlobLeaseManager inactiveLeaseManager = GetBlobLeaseManager(
+                taskHub,
+                "n/a",
+                account.CreateCloudBlobClient(),
+                TimeSpan.Zero,
+                TimeSpan.Zero,
+                null);
             TaskHubInfo hubInfo = await inactiveLeaseManager.GetOrCreateTaskHubInfoAsync(
                 GetTaskHubInfo(taskHub, partitionCount));
 
