@@ -17,6 +17,7 @@ namespace DurableTask.AzureStorage.Tests
     using System.IO;
     using System.Linq;
     using System.Runtime.Serialization;
+    using System.Text;
     using System.Threading;
     using System.Threading.Tasks;
     using DurableTask.Core;
@@ -346,6 +347,40 @@ namespace DurableTask.AzureStorage.Tests
         }
 
         /// <summary>
+        /// End-to-end test which validates that orchestrations with large message sizes can run successfully.
+        /// </summary>
+        [TestMethod]
+        public async Task BigMessagePayloads()
+        {
+            using (TestOrchestrationHost host = TestHelpers.GetTestOrchestrationHost())
+            {
+                await host.StartAsync();
+
+                // Generate a large random string payload
+                const int TargetPayloadSize = 1 * 1024 * 1024; // 1 MB
+                const string Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 {}/<>.-";
+                var sb = new StringBuilder();
+                var random = new Random();
+                while (Encoding.UTF32.GetByteCount(sb.ToString()) < TargetPayloadSize)
+                {
+                    for (int i = 0; i < 1000; i++)
+                    {
+                        sb.Append(Chars[random.Next(Chars.Length)]);
+                    }
+                }
+
+                string message = sb.ToString();
+                var client = await host.StartOrchestrationAsync(typeof(Orchestrations.Echo), message);
+                var status = await client.WaitForCompletionAsync(TimeSpan.FromSeconds(30));
+
+                Assert.AreEqual(OrchestrationStatus.Completed, status?.OrchestrationStatus);
+                Assert.AreEqual(message, status?.Output);
+
+                await host.StopAsync();
+            }
+        }
+
+        /// <summary>
         /// Test which validates the ETW event source.
         /// </summary>
         [TestMethod]
@@ -542,6 +577,15 @@ namespace DurableTask.AzureStorage.Tests
                     return catchCount;
                 }
             }
+
+            internal class Echo : TaskOrchestration<string, string>
+            {
+                public override Task<string> RunTask(OrchestrationContext context, string input)
+                {
+                    return context.ScheduleTask<string>(typeof(Activities.Echo), input);
+                }
+            }
+
         }
 
         static class Activities
@@ -584,6 +628,14 @@ namespace DurableTask.AzureStorage.Tests
                 protected override string Execute(TaskContext context, string message)
                 {
                     throw new Exception(message);
+                }
+            }
+
+            internal class Echo : TaskActivity<string, string>
+            {
+                protected override string Execute(TaskContext context, string input)
+                {
+                    return input;
                 }
             }
         }

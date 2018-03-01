@@ -207,7 +207,7 @@ namespace DurableTask.AzureStorage
                 taskMessage.Event.EventType.ToString(),
                 taskMessage.OrchestrationInstance.InstanceId,
                 taskMessage.OrchestrationInstance.ExecutionId,
-                Encoding.UTF8.GetByteCount(rawContent),
+                Encoding.UTF32.GetByteCount(rawContent),
                 PartitionId: data.QueueName);
 
             return new CloudQueueMessage(rawContent);
